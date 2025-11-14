@@ -8,8 +8,13 @@ A solution for updating Y2JB on PS5.
 
 1.  Put the update ZIP in one of these places:
     * `USB/y2jb_update.zip`
+    * `USB/ps5_autoloader/y2jb_update.zip`
     * `/data/y2jb_update.zip`
-2.  Start Y2JB, send the kernel exploit (e.g., `lapse.js`)  
+    * `/data/ps5_autoloader/y2jb_update.zip`
+   
+    **Note:** The file name must exactly match: `y2jb_update.zip`
+
+3.  Start Y2JB, send the kernel exploit (e.g., `lapse.js`)  
 **Note:** The `lapse.js` included in the original Y2JB, automatically closes YT app after finishing.
 Use this modified version for now: [lapse_no_elfldr_not_autoclosing.js](https://github.com/itsPLK/y2jb_updater/releases/download/v1.0/lapse_no_elfldr_not_autoclosing.js)
 4.  Send **`update.js`**.
@@ -23,7 +28,11 @@ The script will update the Y2JB files. If successful, it will also delete the `y
 The updater is included in the autoloader (since version v0.2).
 *  Put the update ZIP in one of these places:
     * `USB/y2jb_update.zip`
+    * `USB/ps5_autoloader/y2jb_update.zip`
     * `/data/y2jb_update.zip`
+    * `/data/ps5_autoloader/y2jb_update.zip`
+   
+    **Note:** The file name must exactly match: `y2jb_update.zip`
 
 The autoloader will automatically apply the update after loading the kernel exploit.
 
