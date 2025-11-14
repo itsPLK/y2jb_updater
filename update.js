@@ -13,14 +13,17 @@
 
   const Y2JB_UPDATER_VERSION = "1.0";
 
-  let FINAL_PATH = "/mnt/sandbox/" + get_title_id() + "_000/download0/cache/splash_screen/aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=";
-  let EXTRACT_PATH = "/mnt/sandbox/" + get_title_id() + "_000/download0/cache/splash_screen/UPDATE_EXTRACT";
-  let TEMP_BACKUP = "/mnt/sandbox/" + get_title_id() + "_000/download0/cache/splash_screen/OLD";
+  const WORKDIR = "/mnt/sandbox/" + get_title_id() + "_000/download0/cache/splash_screen/";
+  const WORKDIR_DEBUG = "/mnt/usb0/";
+
+  let FINAL_PATH =  WORKDIR + "aHR0cHM6Ly93d3cueW91dHViZS5jb20vdHY=";
+  let EXTRACT_PATH = WORKDIR + "UPDATER_EXTRACT";
+  let TEMP_BACKUP = WORKDIR + "UPDATER_BACKUP";
 
   if (UPDATE_DEBUG == true) {
-      FINAL_PATH = "/mnt/usb0/FINAL";
-      EXTRACT_PATH = "/mnt/usb0/UPDATE_EXTRACT";
-      TEMP_BACKUP = "/mnt/usb0/OLD";
+      FINAL_PATH = WORKDIR_DEBUG + "UPDATER_DEBUG_FINAL";
+      EXTRACT_PATH = WORKDIR_DEBUG + "UPDATER_DEBUG_EXTRACT";
+      TEMP_BACKUP = WORKDIR_DEBUG + "UPDATER_DEBUG_BACKUP";
   }
 
   const createdDirs = new Set(['/']);
@@ -82,21 +85,26 @@
         send_notification("rmdir: invalid path (must be absolute)");
         return { ok: false, code: -1n, msg: "path must be absolute" };
       }
-      const norm = typeof normalizePath === "function" ? normalizePath(dirPath) : dirPath;
-      if (!norm) {
-        send_notification("rmdir: normalization failed");
-        return { ok: false, code: -1n, msg: "invalid path" };
+
+      if (!dirPath.startsWith(WORKDIR) && !dirPath.startsWith(WORKDIR_DEBUG)) {
+        send_notification("rmdir: refusing to remove outside safe area -> " + dirPath);
+        return { ok: false, code: -3n, msg: "refuse to remove outside safe area" };
       }
-      const parts = norm.split("/");
-      if (parts.length <= 2) {
-        send_notification("rmdir: refusing to remove root or top-level -> " + norm);
-        return { ok: false, code: -2n, msg: "refuse to remove root or top-level" };
+
+      const parts = dirPath.split("/");
+      if (dirPath.startsWith(WORKDIR_DEBUG) && parts.length <= 3) { // e.g., blocks /mnt/usb0 itself
+          send_notification("rmdir: refusing to remove debug root -> " + dirPath);
+          return { ok: false, code: -2n, msg: "refuse to remove top-level" };
+      }
+      if (dirPath.startsWith(WORKDIR) && parts.length <= 7) { // blocks base path
+          send_notification("rmdir: refusing to remove sandbox root -> " + dirPath);
+          return { ok: false, code: -2n, msg: "refuse to remove top-level" };
       }
 
       const O_RDONLY = 0n;
       const buf_size = 4096n;
       const buf = malloc(buf_size);
-      const path_ptr = alloc_string(norm);
+      const path_ptr = alloc_string(dirPath);
       const dirfd = syscall(SYSCALL.open, path_ptr, O_RDONLY, 0n);
       if (dirfd < 0n) {
         send_notification("rmdir: open failed -> " + toHex(dirfd));
@@ -108,7 +116,7 @@
       const stat_ret = syscall(SYSCALL.stat, path_ptr, stat_chk_buf);
       if (stat_ret !== 0n) {
         syscall(SYSCALL.close, dirfd);
-        send_notification("rmdir: path does not exist or inaccessible -> " + String(norm));
+        send_notification("rmdir: path does not exist or inaccessible -> " + String(dirPath));
         return { ok: false, code: stat_ret, msg: "not exists or inaccessible" };
       }
 
@@ -151,39 +159,50 @@
       // 2) Process collected entries sequentially
       for (const ent of entries) {
         const name = ent.name;
-        const child = norm === "/" ? ("/" + name) : (norm + "/" + name);
-
+        const child = dirPath === "/" ? ("/" + name) : (dirPath + "/" + name);
         const cptr = alloc_string(child);
-        const unlinkRet = syscall(SYSCALL.unlink, cptr);
-        if (unlinkRet === 0n) {
-          await sleep(10);
-          continue;
-        }
 
-        // Fallback: stat to check if directory
-        const stat_buf = malloc(0x200n);
-        const sret = syscall(SYSCALL.stat, cptr, stat_buf);
-        if (sret !== 0n) {
-          send_notification("rmdir: stat failed for " + child + " -> " + toHex(sret));
-          return { ok: false, code: unlinkRet, msg: "unlink failed and stat failed" };
-        }
-        const st_mode = read16(stat_buf + 8n);
-
-        if ((st_mode & 0x4000n) !== 0n) {
+        if (ent.d_type === 0x4) { // It's a directory
           // directory -> recurse
           const rec = await rmdir(child);
           if (!rec.ok) return rec;
           await sleep(20);
+
+        } else if (ent.d_type === 0x8) { // It's a file
+          const unlinkRet = syscall(SYSCALL.unlink, cptr);
+          if (unlinkRet !== 0n) {
+            send_notification("rmdir: unlink failed for file " + child + " -> " + toHex(unlinkRet));
+            return { ok: false, code: unlinkRet, msg: "unlink failed for file" };
+          }
+          await sleep(10);
+
         } else {
-          send_notification("rmdir: unlink failed for non-dir " + child + " -> " + toHex(unlinkRet));
-          return { ok: false, code: unlinkRet, msg: "unlink failed for file" };
+          // It's a symlink, socket, etc. Try to unlink it.
+          const unlinkRet = syscall(SYSCALL.unlink, cptr);
+          if (unlinkRet === 0n) {
+            await sleep(10);
+            continue;
+          }
+          
+          // If unlink failed, it might be a directory we couldn't stat (e.g. symlink to dir)
+          // Fallback to the stat logic just in case
+          const stat_buf = malloc(0x200n);
+          const sret = syscall(SYSCALL.stat, cptr, stat_buf);
+          if (sret === 0n && (read16(stat_buf + 8n) & 0x4000n) !== 0n) {
+            const rec = await rmdir(child);
+            if (!rec.ok) return rec;
+            await sleep(20);
+          } else {
+            send_notification("rmdir: unlink failed for " + child + " -> " + toHex(unlinkRet));
+            return { ok: false, code: unlinkRet, msg: "unlink failed for unknown type" };
+          }
         }
       }
 
       // finally remove the directory itself
-      const final = syscall(SYSCALL.rmdir, alloc_string(norm));
+      const final = syscall(SYSCALL.rmdir, alloc_string(dirPath));
       if (final !== 0n) {
-        send_notification("rmdir: final rmdir failed for " + norm + " -> " + toHex(final));
+        send_notification("rmdir: final rmdir failed for " + dirPath + " -> " + toHex(final));
         return { ok: false, code: final, msg: "final rmdir failed" };
       }
 
@@ -252,8 +271,12 @@
       throw new Error("read_file_to_buffer: stat failed for " + path);
     }
     const file_size = Number(read64(stat_buf + 72n));
-    if (file_size <= 0) {
+
+    if (file_size < 0n) {
       throw new Error("read_file_to_buffer: invalid file size " + file_size);
+    }
+    if (file_size === 0n) { // empty file
+        return { buffer: malloc(0n), size: 0 };
     }
 
     const fd = syscall(SYSCALL.open, path_addr, O_RDONLY, 0n);
@@ -411,19 +434,15 @@
       }
   }
 
-  const updatePaths = [
-    "/mnt/usb0/y2jb_update.zip",
-    "/mnt/usb1/y2jb_update.zip",
-    "/mnt/usb2/y2jb_update.zip",
-    "/mnt/usb3/y2jb_update.zip",
-    "/mnt/usb4/y2jb_update.zip",
-    "/mnt/usb5/y2jb_update.zip",
-    "/mnt/usb6/y2jb_update.zip",
-    "/mnt/usb7/y2jb_update.zip",
-    "/data/y2jb_update.zip",
-  ];
+  const updatePaths = [];
+  for (let i = 0; i <= 7; i++) {
+      updatePaths.push(`/mnt/usb${i}/y2jb_update.zip`);
+      updatePaths.push(`/mnt/usb${i}/ps5_autoloader/y2jb_update.zip`);
+  }
+  updatePaths.push("/data/y2jb_update.zip");
+  updatePaths.push("/data/ps5_autoloader/y2jb_update.zip");
 
-  async function start_update() {
+  async function update() {
     let updateFound = false;
     let updatePath = null;
     for (const path of updatePaths) {
@@ -456,8 +475,30 @@
           } else {
               // proceed with renaming only if verification passed
               await renamePath(FINAL_PATH, TEMP_BACKUP);
+              // check if rename succeeded
+              if (!file_exists(TEMP_BACKUP)) {
+                  send_notification("Failed to rename:\n" + FINAL_PATH + " ->\n" + TEMP_BACKUP + "\nAborting update.");
+                  log("Failed to rename "+ FINAL_PATH + " -> " + TEMP_BACKUP + " Aborting update.");
+                  // cleanup extracted files, don't remove update packages
+                  await sleep(100);
+                  await cleanUp(false);
+                  return;
+              }
               await renamePath(EXTRACT_PATH, FINAL_PATH);
-
+              if (!file_exists(FINAL_PATH)) {
+                  send_notification("Failed to rename:\n" + EXTRACT_PATH + " ->\n" + FINAL_PATH + "\nAborting update.");
+                  log("Failed to rename "+ EXTRACT_PATH + " -> " + FINAL_PATH + ". Aborting update.");
+                  // try to restore backup
+                  await renamePath(TEMP_BACKUP, FINAL_PATH);
+                  if (file_exists(FINAL_PATH)) {
+                      send_notification("Restored original files from backup.");
+                      log("Restored original files from backup.");
+                  } else {
+                      send_notification("Failed to restore original files from backup!\nUse ftp to fix your Y2JB files.");
+                      log("Failed to restore original files from backup! Use ftp to fix your Y2JB files.");
+                  }
+                  return;
+              }
               await sleep(100);
               if (UPDATE_DEBUG) {
                   await cleanUp(false);
@@ -516,15 +557,26 @@
           continue;
         }
 
-        const safeName = name.replace(/\.\.\//g, "");
-        const outPath = outDir + safeName;
+        if (name.startsWith('/') || name.includes('../')) {
+          log("Skipping unsafe entry: " + name);
+          continue;
+        }
+
+        const outPath = outDir + name;
 
         const pdir = parentDir(outPath);
-        if (pdir && pdir.length > 0) ensureDirectoryExists(pdir);
+        if (pdir && pdir.length > 0) {
+          // Ensure parent dir doesn't escape the extract path
+          if (!pdir.startsWith(outDir.slice(0, -1))) { // slice(0, -1) removes trailing '/' from outDir
+              log("Skipping malicious parent path: " + name);
+              continue;
+          }
+          ensureDirectoryExists(pdir);
+        }
 
         // if entry is a directory (name ends with '/'), create it and skip write
         if (name.endsWith('/')) {
-            const dirPath = outDir + safeName.replace(/\/+$/,'');
+            const dirPath = outDir + name.replace(/\/+$/,'');
             ensureDirectoryExists(dirPath);
             log("Created dir: " + dirPath);
             continue;
@@ -573,30 +625,29 @@
       }
       // remove extracted update directory if exists
       if (file_exists(EXTRACT_PATH)) {
-          rmdir(EXTRACT_PATH).then(res => {
-              if (res.ok) {
-                  log("Cleaned up extracted update directory: " + EXTRACT_PATH);
-              } else {
-                  log("Failed to clean up extracted update directory: " + EXTRACT_PATH + " code: " + String(res.code));
-                  send_notification("Failed to clean up extracted update directory: " + EXTRACT_PATH + " code: " + String(res.code));
-              }
-          });
+
+        const res = await rmdir(EXTRACT_PATH);
+        if (res.ok) {
+            log("Cleaned up extracted update directory: " + EXTRACT_PATH);
+        } else {
+            log("Failed to clean up extracted update directory: " + EXTRACT_PATH + " code: " + String(res.code));
+            send_notification("Failed to clean up extracted update directory: " + EXTRACT_PATH + " code: " + String(res.code));
+        }
       }
 
       // remove OLD directory if exists
       if (file_exists(TEMP_BACKUP)) {
-          rmdir(TEMP_BACKUP).then(res => {
-              if (res.ok) {
-                  log("Cleaned up OLD directory: " + TEMP_BACKUP);
-              } else {
-                  log("Failed to clean up OLD directory: " + TEMP_BACKUP + " code: " + String(res.code));
-                  send_notification("Failed to clean up OLD directory: " + TEMP_BACKUP + " code: " + String(res.code));
-              }
-          });
+          const res = await rmdir(TEMP_BACKUP);
+          if (res.ok) {
+              log("Cleaned up OLD directory: " + TEMP_BACKUP);
+          } else {
+              log("Failed to clean up OLD directory: " + TEMP_BACKUP + " code: " + String(res.code));
+              send_notification("Failed to clean up OLD directory: " + TEMP_BACKUP + " code: " + String(res.code));
+          }
       }
   }
 
   log("Y2JB Updater v" + Y2JB_UPDATER_VERSION + " by PLK");
-  await start_update();
+  await update();
 
 })();
