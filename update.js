@@ -11,7 +11,7 @@
 
   const UPDATE_DEBUG = false;
 
-  const Y2JB_UPDATER_VERSION = "1.0";
+  const Y2JB_UPDATER_VERSION = "1.1";
 
   const WORKDIR = "/mnt/sandbox/" + get_title_id() + "_000/download0/cache/splash_screen/";
   const WORKDIR_DEBUG = "/mnt/usb0/";
@@ -595,6 +595,29 @@
 
       log("Extracted " + count + " files to " + outDir);
       send_notification("Extracted " + count + " files");
+
+      // set splash.html permission to 444 (read-only)
+      try {
+          const splashPath = EXTRACT_PATH + "/splash.html";
+          if (file_exists(splashPath)) {
+              const splash_addr = alloc_string(splashPath);
+              const mode = 0o444n; // Read-only (r--r--r--)
+              const ret = syscall(SYSCALL.chmod, splash_addr, mode);
+              if (ret === 0n) {
+                  log("Set permissions for splash.html to 444");
+              } else {
+                  log("[WARN] Failed to set permissions for splash.html. Code: " + toHex(ret));
+                  send_notification("[WARN] Failed to set permissions for splash.html");
+              }
+          } else {
+              log("[WARN] splash.html not found, skipping chmod.");
+          }
+      } catch (e) {
+          const msg = "[ERROR] chmod splash.html: " + (e && e.message ? e.message : String(e));
+          log(msg);
+          send_notification(msg);
+      }
+
 
       await sleep(200);
       log("Update processing complete");
